@@ -19,6 +19,7 @@ from PyQt6.QtWidgets import (
 from core.engine import VideoGenerationEngine, GenerationSettings, DEFAULT_NEGATIVE_PROMPT
 from core.tts_engine import TTSEngine, VOICE_CATALOG
 from core.audio_merge import merge_audio_video
+from core.dialogue_parser import parse_dialogue, get_voice_summary
 from core.video_concat import concat_videos, get_video_info
 from utils.gpu_detect import (
     get_hardware_profile, RESOLUTION_PRESETS, DURATION_PRESETS,
@@ -161,19 +162,20 @@ class MainWindow(QMainWindow):
 
         left_layout.addWidget(prompt_group)
 
-        # Voice / Narration section
-        voice_group = QGroupBox("Voice Output")
+        # Voice / Smart Dialogue section
+        voice_group = QGroupBox("Voice Output — Smart Dialogue")
         voice_layout = QVBoxLayout(voice_group)
 
         self.enable_voice_check = QCheckBox(
-            "Read prompt as voice in output video"
+            "Enable voice output from prompt"
         )
         self.enable_voice_check.toggled.connect(self._toggle_voice_panel)
         voice_layout.addWidget(self.enable_voice_check)
 
         voice_hint = QLabel(
-            "When enabled, your prompt text above will be spoken as voice "
-            "narration and merged into the final video audio."
+            "Use character tags in your prompt for automatic multi-voice dialogue:\n"
+            '[Girl]: I love you.  [Husband]: I love you too.\n'
+            "Voices are auto-assigned based on character (female/male detected automatically)."
         )
         voice_hint.setWordWrap(True)
         voice_hint.setObjectName("statusLabel")
@@ -183,15 +185,6 @@ class MainWindow(QMainWindow):
         self.voice_settings_widget = QWidget()
         voice_settings_layout = QVBoxLayout(self.voice_settings_widget)
         voice_settings_layout.setContentsMargins(0, 4, 0, 0)
-
-        voice_row = QHBoxLayout()
-        voice_row.addWidget(QLabel("Voice:"))
-        self.voice_combo = QComboBox()
-        for v in VOICE_CATALOG:
-            self.voice_combo.addItem(f"{v.name}  ({v.quality})", v.id)
-        self.voice_combo.setCurrentIndex(0)
-        voice_row.addWidget(self.voice_combo, 1)
-        voice_settings_layout.addLayout(voice_row)
 
         speed_row = QHBoxLayout()
         speed_row.addWidget(QLabel("Speed:"))
@@ -670,58 +663,125 @@ class MainWindow(QMainWindow):
         self.worker.start()
 
     def _merge_voice_with_video(self, video_path: str) -> str:
-        """If voice is enabled, generate TTS from prompt and merge with video. Returns final path."""
+        """If voice is enabled, parse dialogue, generate multi-speaker TTS,
+        and merge with video. Returns final path."""
         if not self.enable_voice_check.isChecked():
             return video_path
 
-        # Use the main prompt text as voice narration
-        voice_text = self.prompt_edit.toPlainText().strip()
-        if not voice_text:
+        prompt_text = self.prompt_edit.toPlainText().strip()
+        if not prompt_text:
             return video_path
 
-        voice_id = self.voice_combo.currentData()
         speed = float(self.voice_speed_combo.currentData())
         volume = float(self.voice_volume_combo.currentData())
 
-        self.status_label.setText("Generating voice narration...")
-        self.progress_bar.setFormat("Generating voice narration...")
-
         try:
-            # Generate TTS audio
-            wav_path = video_path.replace(".mp4", "_voice.wav")
-            self.tts_engine.synthesize(
-                text=voice_text,
-                output_path=wav_path,
-                voice_id=voice_id,
-                speed=speed,
-            )
+            # Parse dialogue segments from prompt
+            self.status_label.setText("Parsing dialogue from prompt...")
+            self.progress_bar.setFormat("Parsing dialogue...")
+            segments = parse_dialogue(prompt_text)
 
-            # Merge audio with video
+            # Log voice assignments
+            summary = get_voice_summary(segments)
+            logger.info(f"Dialogue parsed: {len(segments)} segments\n{summary}")
+
+            # Filter to only spoken segments (dialogue lines)
+            spoken = [s for s in segments if s.is_dialogue]
+            if not spoken:
+                # No character dialogue found — read entire prompt as narration
+                spoken = segments
+
+            # Generate TTS for each spoken segment
+            temp_wavs = []
+            for i, seg in enumerate(spoken):
+                self.status_label.setText(
+                    f"Generating voice {i+1}/{len(spoken)}: "
+                    f"{seg.character or 'Narrator'}..."
+                )
+                self.progress_bar.setFormat(
+                    f"Voice {i+1}/{len(spoken)}: {seg.character or 'Narrator'}"
+                )
+
+                wav_path = video_path.replace(".mp4", f"_voice_{i}.wav")
+                self.tts_engine.synthesize(
+                    text=seg.text,
+                    output_path=wav_path,
+                    voice_id=seg.voice_id,
+                    speed=speed,
+                )
+                temp_wavs.append(wav_path)
+
+            # Concatenate all WAV segments into one audio file
+            self.status_label.setText("Combining voice segments...")
+            combined_wav = video_path.replace(".mp4", "_voice_combined.wav")
+
+            if len(temp_wavs) == 1:
+                combined_wav = temp_wavs[0]
+            else:
+                self._concat_wav_files(temp_wavs, combined_wav)
+
+            # Merge combined audio with video
             self.status_label.setText("Merging voice with video...")
             self.progress_bar.setFormat("Merging voice with video...")
 
             merged_path = video_path.replace(".mp4", "_with_voice.mp4")
             merge_audio_video(
                 video_path=video_path,
-                audio_path=wav_path,
+                audio_path=combined_wav,
                 output_path=merged_path,
                 audio_volume=volume,
                 fade_in=0.2,
                 fade_out=0.3,
             )
 
-            # Clean up temp WAV
-            try:
-                os.remove(wav_path)
-            except OSError:
-                pass
+            # Clean up temp files
+            for wav in temp_wavs:
+                try:
+                    os.remove(wav)
+                except OSError:
+                    pass
+            if combined_wav not in temp_wavs:
+                try:
+                    os.remove(combined_wav)
+                except OSError:
+                    pass
 
             return merged_path
 
         except Exception as e:
             logger.error(f"Voice merge failed: {e}")
-            self.status_label.setText(f"Voice merge failed: {e} — video saved without audio")
+            self.status_label.setText(
+                f"Voice merge failed: {e} — video saved without audio"
+            )
             return video_path
+
+    def _concat_wav_files(self, wav_paths: list, output_path: str):
+        """Concatenate multiple WAV files into one, adding small silence gaps."""
+        import wave
+        import struct
+
+        if not wav_paths:
+            return
+
+        # Read first file to get parameters
+        with wave.open(wav_paths[0], "r") as first:
+            params = first.getparams()
+            sample_rate = first.getframerate()
+            channels = first.getnchannels()
+            sampwidth = first.getsampwidth()
+
+        # 0.3 second silence between segments
+        silence_frames = int(sample_rate * 0.3)
+        silence_data = b'\x00' * silence_frames * channels * sampwidth
+
+        with wave.open(output_path, "w") as out:
+            out.setparams(params)
+            for i, path in enumerate(wav_paths):
+                with wave.open(path, "r") as wf:
+                    out.writeframes(wf.readframes(wf.getnframes()))
+                # Add silence gap between segments (not after last)
+                if i < len(wav_paths) - 1:
+                    out.writeframes(silence_data)
 
     def _on_generation_complete(self, result):
         """Handle generation completion."""
