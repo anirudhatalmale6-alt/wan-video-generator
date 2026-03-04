@@ -17,6 +17,8 @@ from PyQt6.QtWidgets import (
 )
 
 from core.engine import VideoGenerationEngine, GenerationSettings, DEFAULT_NEGATIVE_PROMPT
+from core.tts_engine import TTSEngine, VOICE_CATALOG
+from core.audio_merge import merge_audio_video
 from core.video_concat import concat_videos, get_video_info
 from utils.gpu_detect import (
     get_hardware_profile, RESOLUTION_PRESETS, DURATION_PRESETS,
@@ -38,6 +40,7 @@ class MainWindow(QMainWindow):
 
         # State
         self.engine = VideoGenerationEngine()
+        self.tts_engine = TTSEngine()
         self.current_image_path = None
         self.current_image = None
         self.last_generated_frames = None
@@ -157,6 +160,63 @@ class MainWindow(QMainWindow):
         prompt_layout.addWidget(self.prompt_edit)
 
         left_layout.addWidget(prompt_group)
+
+        # Voice / Narration section
+        voice_group = QGroupBox("Voice / Narration")
+        voice_layout = QVBoxLayout(voice_group)
+
+        self.enable_voice_check = QCheckBox("Enable voice narration in output video")
+        self.enable_voice_check.toggled.connect(self._toggle_voice_panel)
+        voice_layout.addWidget(self.enable_voice_check)
+
+        # Voice settings container (hidden by default)
+        self.voice_settings_widget = QWidget()
+        voice_settings_layout = QVBoxLayout(self.voice_settings_widget)
+        voice_settings_layout.setContentsMargins(0, 4, 0, 0)
+
+        voice_settings_layout.addWidget(QLabel("Narration text (what the voice will say):"))
+        self.voice_text_edit = QTextEdit()
+        self.voice_text_edit.setPlaceholderText(
+            "Type the narration or dialogue you want spoken over the video. "
+            "This is separate from the motion prompt above.\n\n"
+            "Example: Welcome to our world. Let me show you something magical..."
+        )
+        self.voice_text_edit.setMinimumHeight(60)
+        self.voice_text_edit.setMaximumHeight(100)
+        voice_settings_layout.addWidget(self.voice_text_edit)
+
+        voice_row = QHBoxLayout()
+        voice_row.addWidget(QLabel("Voice:"))
+        self.voice_combo = QComboBox()
+        for v in VOICE_CATALOG:
+            self.voice_combo.addItem(f"{v.name}  ({v.quality})", v.id)
+        self.voice_combo.setCurrentIndex(0)
+        voice_row.addWidget(self.voice_combo, 1)
+        voice_settings_layout.addLayout(voice_row)
+
+        speed_row = QHBoxLayout()
+        speed_row.addWidget(QLabel("Speed:"))
+        self.voice_speed_combo = QComboBox()
+        self.voice_speed_combo.addItem("Slow (0.75x)", "0.75")
+        self.voice_speed_combo.addItem("Normal (1.0x)", "1.0")
+        self.voice_speed_combo.addItem("Fast (1.25x)", "1.25")
+        self.voice_speed_combo.addItem("Very Fast (1.5x)", "1.5")
+        self.voice_speed_combo.setCurrentIndex(1)
+        speed_row.addWidget(self.voice_speed_combo, 1)
+
+        speed_row.addWidget(QLabel("Volume:"))
+        self.voice_volume_combo = QComboBox()
+        self.voice_volume_combo.addItem("Low (50%)", "0.5")
+        self.voice_volume_combo.addItem("Medium (75%)", "0.75")
+        self.voice_volume_combo.addItem("Full (100%)", "1.0")
+        self.voice_volume_combo.setCurrentIndex(2)
+        speed_row.addWidget(self.voice_volume_combo, 1)
+        voice_settings_layout.addLayout(speed_row)
+
+        self.voice_settings_widget.setVisible(False)
+        voice_layout.addWidget(self.voice_settings_widget)
+
+        left_layout.addWidget(voice_group)
         left_layout.addStretch()
 
         splitter.addWidget(left_panel)
@@ -396,6 +456,10 @@ class MainWindow(QMainWindow):
         # Connect quality combo to steps spin
         self.quality_combo.currentIndexChanged.connect(self._quality_changed)
 
+    def _toggle_voice_panel(self, checked: bool):
+        """Show/hide voice settings panel."""
+        self.voice_settings_widget.setVisible(checked)
+
     def _default_output_dir(self) -> str:
         """Get default output directory."""
         d = os.path.join(os.path.expanduser("~"), "WAN_Videos")
@@ -606,32 +670,91 @@ class MainWindow(QMainWindow):
         self.worker.error.connect(self._on_generation_error)
         self.worker.start()
 
+    def _merge_voice_with_video(self, video_path: str) -> str:
+        """If voice is enabled, generate TTS and merge with video. Returns final path."""
+        if not self.enable_voice_check.isChecked():
+            return video_path
+
+        voice_text = self.voice_text_edit.toPlainText().strip()
+        if not voice_text:
+            return video_path
+
+        voice_id = self.voice_combo.currentData()
+        speed = float(self.voice_speed_combo.currentData())
+        volume = float(self.voice_volume_combo.currentData())
+
+        self.status_label.setText("Generating voice narration...")
+        self.progress_bar.setFormat("Generating voice narration...")
+
+        try:
+            # Generate TTS audio
+            wav_path = video_path.replace(".mp4", "_voice.wav")
+            self.tts_engine.synthesize(
+                text=voice_text,
+                output_path=wav_path,
+                voice_id=voice_id,
+                speed=speed,
+            )
+
+            # Merge audio with video
+            self.status_label.setText("Merging voice with video...")
+            self.progress_bar.setFormat("Merging voice with video...")
+
+            merged_path = video_path.replace(".mp4", "_with_voice.mp4")
+            merge_audio_video(
+                video_path=video_path,
+                audio_path=wav_path,
+                output_path=merged_path,
+                audio_volume=volume,
+                fade_in=0.2,
+                fade_out=0.3,
+            )
+
+            # Clean up temp WAV
+            try:
+                os.remove(wav_path)
+            except OSError:
+                pass
+
+            return merged_path
+
+        except Exception as e:
+            logger.error(f"Voice merge failed: {e}")
+            self.status_label.setText(f"Voice merge failed: {e} — video saved without audio")
+            return video_path
+
     def _on_generation_complete(self, result):
         """Handle generation completion."""
-        self._set_ui_busy(False)
-
         if result.success:
+            # Try to add voice narration if enabled
+            final_path = self._merge_voice_with_video(result.output_path)
+
+            self._set_ui_busy(False)
             self.last_generated_frames = result.frames
-            self.last_output_path = result.output_path
-            self.generation_segments.append(result.output_path)
+            self.last_output_path = final_path
+            self.generation_segments.append(final_path)
             self.extend_btn.setEnabled(True)
             self.open_output_btn.setEnabled(True)
+
+            has_voice = final_path != result.output_path
+            voice_tag = " + Voice" if has_voice else ""
 
             # Update seed display if random
             if self.seed_spin.value() == -1:
                 self.status_label.setText(
-                    f"Done! {result.resolution[0]}x{result.resolution[1]}, "
+                    f"Done!{voice_tag} {result.resolution[0]}x{result.resolution[1]}, "
                     f"{result.num_frames} frames, seed={result.seed_used}, "
-                    f"{result.generation_time:.1f}s  |  {result.output_path}"
+                    f"{result.generation_time:.1f}s  |  {final_path}"
                 )
             else:
                 self.status_label.setText(
-                    f"Done! {result.generation_time:.1f}s  |  {result.output_path}"
+                    f"Done!{voice_tag} {result.generation_time:.1f}s  |  {final_path}"
                 )
 
             self.progress_bar.setValue(100)
             self.progress_bar.setFormat("Generation complete!")
         else:
+            self._set_ui_busy(False)
             self.status_label.setText(f"Error: {result.error}")
             QMessageBox.critical(self, "Generation Failed", result.error)
 

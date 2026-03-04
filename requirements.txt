@@ -14,3 +14,4 @@ numpy
 Pillow
 PyQt6>=6.6.0
 psutil
+huggingface_hub
