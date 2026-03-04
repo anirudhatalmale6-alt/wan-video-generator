@@ -162,28 +162,27 @@ class MainWindow(QMainWindow):
         left_layout.addWidget(prompt_group)
 
         # Voice / Narration section
-        voice_group = QGroupBox("Voice / Narration")
+        voice_group = QGroupBox("Voice Output")
         voice_layout = QVBoxLayout(voice_group)
 
-        self.enable_voice_check = QCheckBox("Enable voice narration in output video")
+        self.enable_voice_check = QCheckBox(
+            "Read prompt as voice in output video"
+        )
         self.enable_voice_check.toggled.connect(self._toggle_voice_panel)
         voice_layout.addWidget(self.enable_voice_check)
+
+        voice_hint = QLabel(
+            "When enabled, your prompt text above will be spoken as voice "
+            "narration and merged into the final video audio."
+        )
+        voice_hint.setWordWrap(True)
+        voice_hint.setObjectName("statusLabel")
+        voice_layout.addWidget(voice_hint)
 
         # Voice settings container (hidden by default)
         self.voice_settings_widget = QWidget()
         voice_settings_layout = QVBoxLayout(self.voice_settings_widget)
         voice_settings_layout.setContentsMargins(0, 4, 0, 0)
-
-        voice_settings_layout.addWidget(QLabel("Narration text (what the voice will say):"))
-        self.voice_text_edit = QTextEdit()
-        self.voice_text_edit.setPlaceholderText(
-            "Type the narration or dialogue you want spoken over the video. "
-            "This is separate from the motion prompt above.\n\n"
-            "Example: Welcome to our world. Let me show you something magical..."
-        )
-        self.voice_text_edit.setMinimumHeight(60)
-        self.voice_text_edit.setMaximumHeight(100)
-        voice_settings_layout.addWidget(self.voice_text_edit)
 
         voice_row = QHBoxLayout()
         voice_row.addWidget(QLabel("Voice:"))
@@ -671,11 +670,12 @@ class MainWindow(QMainWindow):
         self.worker.start()
 
     def _merge_voice_with_video(self, video_path: str) -> str:
-        """If voice is enabled, generate TTS and merge with video. Returns final path."""
+        """If voice is enabled, generate TTS from prompt and merge with video. Returns final path."""
         if not self.enable_voice_check.isChecked():
             return video_path
 
-        voice_text = self.voice_text_edit.toPlainText().strip()
+        # Use the main prompt text as voice narration
+        voice_text = self.prompt_edit.toPlainText().strip()
         if not voice_text:
             return video_path
 
