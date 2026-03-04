@@ -273,6 +273,15 @@ class MainWindow(QMainWindow):
         basic_layout.addWidget(self.quality_combo, row, 1)
         row += 1
 
+        # Model Version
+        basic_layout.addWidget(QLabel("Model:"), row, 0)
+        self.model_version_combo = QComboBox()
+        self.model_version_combo.addItem("WAN 2.2 (Best Quality — Recommended)", "wan2.2")
+        self.model_version_combo.addItem("WAN 2.1 (Stable Fallback)", "wan2.1")
+        self.model_version_combo.setCurrentIndex(0)  # Default WAN 2.2
+        basic_layout.addWidget(self.model_version_combo, row, 1)
+        row += 1
+
         basic_layout.setRowStretch(row, 1)
         tabs.addTab(basic_tab, "Basic Settings")
 
@@ -528,6 +537,7 @@ class MainWindow(QMainWindow):
             prompt=self.prompt_edit.toPlainText().strip(),
             negative_prompt=self.neg_prompt_edit.toPlainText().strip(),
             resolution=res_key,
+            model_version=self.model_version_combo.currentData(),
             duration_seconds=dur_preset["seconds"],
             fps=self.fps_spin.value(),
             guidance_scale=self.cfg_spin.value(),
@@ -557,6 +567,7 @@ class MainWindow(QMainWindow):
             settings.device,
             settings.enable_cpu_offload,
             settings.enable_group_offload,
+            settings.model_version,
         )
         self.worker.progress.connect(self._on_progress)
         self.worker.finished.connect(self._on_model_loaded)
@@ -600,6 +611,7 @@ class MainWindow(QMainWindow):
             self.worker = ModelLoadWorker(
                 self.engine, settings.resolution, settings.device,
                 settings.enable_cpu_offload, settings.enable_group_offload,
+                settings.model_version,
             )
             self.worker.progress.connect(self._on_progress)
             self.worker.finished.connect(

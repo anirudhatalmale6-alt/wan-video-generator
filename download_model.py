@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
-"""Download WAN2.1 model weights for offline use.
+"""Download WAN model weights for offline use.
 
 Run this script once while connected to the internet.
 After download, the application works fully offline.
+
+Default: Downloads WAN 2.2 (best quality, recommended).
 """
 
 import argparse
@@ -11,12 +13,12 @@ import sys
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Download WAN2.1 model weights")
+    parser = argparse.ArgumentParser(description="Download WAN model weights")
     parser.add_argument(
-        "--resolution", "-r",
-        choices=["480p", "720p", "both"],
-        default="480p",
-        help="Which model to download (default: 480p)",
+        "--model", "-m",
+        choices=["wan2.2", "wan2.1-480p", "wan2.1-720p", "all"],
+        default="wan2.2",
+        help="Which model to download (default: wan2.2 — best quality)",
     )
     parser.add_argument(
         "--output-dir", "-o",
@@ -28,27 +30,30 @@ def main():
     from huggingface_hub import snapshot_download
 
     models = {
-        "480p": "Wan-AI/Wan2.1-I2V-14B-480P-Diffusers",
-        "720p": "Wan-AI/Wan2.1-I2V-14B-720P-Diffusers",
+        "wan2.2": ("WAN 2.2 (Best Quality)", "Wan-AI/Wan2.2-I2V-A14B-Diffusers"),
+        "wan2.1-480p": ("WAN 2.1 480p", "Wan-AI/Wan2.1-I2V-14B-480P-Diffusers"),
+        "wan2.1-720p": ("WAN 2.1 720p", "Wan-AI/Wan2.1-I2V-14B-720P-Diffusers"),
     }
 
     to_download = []
-    if args.resolution == "both":
+    if args.model == "all":
         to_download = list(models.items())
     else:
-        to_download = [(args.resolution, models[args.resolution])]
+        to_download = [(args.model, models[args.model])]
 
-    for res, repo_id in to_download:
+    print(f"\n{'=' * 60}")
+    print(f"WAN Video Generator — Model Download")
+    print(f"{'=' * 60}\n")
+
+    for key, (name, repo_id) in to_download:
         safe_name = repo_id.replace("/", "--")
         local_dir = os.path.join(args.output_dir, safe_name)
         os.makedirs(local_dir, exist_ok=True)
 
-        print(f"\n{'=' * 60}")
-        print(f"Downloading: {repo_id}")
-        print(f"Resolution:  {res}")
+        print(f"Downloading: {name}")
+        print(f"Repository:  {repo_id}")
         print(f"Target:      {local_dir}")
-        print(f"{'=' * 60}\n")
-        print("This may take a while (model is ~25GB)...\n")
+        print(f"This may take a while (~25GB)...\n")
 
         snapshot_download(
             repo_id=repo_id,
@@ -56,7 +61,7 @@ def main():
             local_dir_use_symlinks=False,
         )
 
-        print(f"\n  {res} model downloaded successfully!")
+        print(f"\n  {name} downloaded successfully!")
         print(f"  Location: {local_dir}\n")
 
     print("=" * 60)

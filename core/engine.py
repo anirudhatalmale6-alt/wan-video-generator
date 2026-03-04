@@ -1,4 +1,4 @@
-"""WAN2.1 Image-to-Video generation engine."""
+"""WAN Image-to-Video generation engine (supports WAN 2.1 and 2.2)."""
 
 import gc
 import logging
@@ -22,11 +22,17 @@ from utils.image_utils import load_and_resize_image, resize_image, extract_last_
 logger = logging.getLogger(__name__)
 
 
-# Model repository IDs
+# Model repository IDs — WAN 2.2 (default, best quality) and WAN 2.1 (fallback)
 MODEL_REPOS = {
-    "480p": "Wan-AI/Wan2.1-I2V-14B-480P-Diffusers",
-    "720p": "Wan-AI/Wan2.1-I2V-14B-720P-Diffusers",
+    # WAN 2.2 — latest, best quality, more realistic motion
+    "wan2.2": "Wan-AI/Wan2.2-I2V-A14B-Diffusers",
+    # WAN 2.1 — stable fallback
+    "wan2.1-480p": "Wan-AI/Wan2.1-I2V-14B-480P-Diffusers",
+    "wan2.1-720p": "Wan-AI/Wan2.1-I2V-14B-720P-Diffusers",
 }
+
+# Default model version
+DEFAULT_MODEL = "wan2.2"
 
 DEFAULT_NEGATIVE_PROMPT = (
     "Bright tones, overexposed, static, blurred details, subtitles, style, works, "
@@ -43,6 +49,7 @@ class GenerationSettings:
     prompt: str = ""
     negative_prompt: str = DEFAULT_NEGATIVE_PROMPT
     resolution: str = "480p"  # "480p", "720p", "1080p"
+    model_version: str = "wan2.2"  # "wan2.2" (best), "wan2.1"
     duration_seconds: float = 5.0
     fps: int = 16
     guidance_scale: float = 5.0
@@ -67,7 +74,7 @@ class GenerationResult:
 
 
 class VideoGenerationEngine:
-    """Main engine for WAN2.1 image-to-video generation."""
+    """Main engine for WAN image-to-video generation (supports WAN 2.1 and 2.2)."""
 
     def __init__(self, model_dir: Optional[str] = None):
         self.model_dir = model_dir or os.path.join(
@@ -91,12 +98,16 @@ class VideoGenerationEngine:
         if self._progress_callback:
             self._progress_callback(step, total, message)
 
-    def _get_model_repo(self, resolution: str) -> str:
-        """Get the appropriate model repo for resolution."""
-        if resolution == "1080p":
-            # Use 720p model for 1080p — it handles higher res with offloading
-            return MODEL_REPOS["720p"]
-        return MODEL_REPOS.get(resolution, MODEL_REPOS["480p"])
+    def _get_model_repo(self, resolution: str, model_version: str = "wan2.2") -> str:
+        """Get the appropriate model repo for resolution and model version."""
+        if model_version == "wan2.2":
+            # WAN 2.2 uses a single unified model for all resolutions
+            return MODEL_REPOS["wan2.2"]
+        else:
+            # WAN 2.1 has separate models per resolution
+            if resolution in ("720p", "1080p"):
+                return MODEL_REPOS["wan2.1-720p"]
+            return MODEL_REPOS["wan2.1-480p"]
 
     def _get_max_area(self, resolution: str) -> int:
         """Get max pixel area for resolution."""
@@ -109,15 +120,15 @@ class VideoGenerationEngine:
         """Check if a model is currently loaded."""
         return self.pipe is not None
 
-    def get_model_path(self, resolution: str) -> str:
+    def get_model_path(self, resolution: str, model_version: str = "wan2.2") -> str:
         """Get local path where model should be stored."""
-        repo = self._get_model_repo(resolution)
+        repo = self._get_model_repo(resolution, model_version)
         safe_name = repo.replace("/", "--")
         return os.path.join(self.model_dir, safe_name)
 
-    def is_model_downloaded(self, resolution: str) -> bool:
+    def is_model_downloaded(self, resolution: str, model_version: str = "wan2.2") -> bool:
         """Check if model weights exist locally."""
-        model_path = self.get_model_path(resolution)
+        model_path = self.get_model_path(resolution, model_version)
         if os.path.isdir(model_path):
             # Check for key files
             has_transformer = os.path.isdir(os.path.join(model_path, "transformer"))
@@ -125,12 +136,12 @@ class VideoGenerationEngine:
             return has_transformer and has_vae
         return False
 
-    def download_model(self, resolution: str):
+    def download_model(self, resolution: str, model_version: str = "wan2.2"):
         """Download model weights from Hugging Face Hub."""
         from huggingface_hub import snapshot_download
 
-        repo = self._get_model_repo(resolution)
-        model_path = self.get_model_path(resolution)
+        repo = self._get_model_repo(resolution, model_version)
+        model_path = self.get_model_path(resolution, model_version)
 
         self._report_progress(0, 100, f"Downloading {repo}...")
         logger.info(f"Downloading model {repo} to {model_path}")
@@ -148,23 +159,26 @@ class VideoGenerationEngine:
 
     def load_model(self, resolution: str, device: str = "cuda",
                    enable_cpu_offload: bool = False,
-                   enable_group_offload: bool = False):
+                   enable_group_offload: bool = False,
+                   model_version: str = "wan2.2"):
         """Load the model pipeline."""
         from diffusers import AutoencoderKLWan, WanImageToVideoPipeline
         from transformers import CLIPVisionModel
 
-        # Unload previous model if different resolution
-        if self.pipe is not None and self.current_model_res != resolution:
+        model_key = f"{model_version}_{resolution}"
+
+        # Unload previous model if different
+        if self.pipe is not None and self.current_model_res != model_key:
             self.unload_model()
 
         if self.pipe is not None:
             return  # Already loaded
 
-        repo = self._get_model_repo(resolution)
-        model_path = self.get_model_path(resolution)
+        repo = self._get_model_repo(resolution, model_version)
+        model_path = self.get_model_path(resolution, model_version)
 
         # Use local path if downloaded, otherwise use repo ID (requires internet)
-        model_source = model_path if self.is_model_downloaded(resolution) else repo
+        model_source = model_path if self.is_model_downloaded(resolution, model_version) else repo
 
         self._report_progress(0, 4, "Loading image encoder...")
         logger.info(f"Loading model from {model_source}")
@@ -212,9 +226,9 @@ class VideoGenerationEngine:
         if hasattr(self.pipe, "safety_checker"):
             self.pipe.safety_checker = None
 
-        self.current_model_res = resolution
-        self._report_progress(4, 4, "Model loaded successfully")
-        logger.info("Model loaded and ready")
+        self.current_model_res = model_key
+        self._report_progress(4, 4, f"Model loaded successfully ({model_version})")
+        logger.info(f"Model loaded and ready ({model_version})")
 
     def _apply_group_offloading(self):
         """Apply group offloading for low-VRAM GPUs."""

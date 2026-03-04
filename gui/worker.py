@@ -33,13 +33,15 @@ class ModelLoadWorker(QThread):
     progress = pyqtSignal(int, int, str)
     finished = pyqtSignal(bool, str)  # success, message
 
-    def __init__(self, engine, resolution, device, cpu_offload, group_offload):
+    def __init__(self, engine, resolution, device, cpu_offload, group_offload,
+                 model_version="wan2.2"):
         super().__init__()
         self.engine = engine
         self.resolution = resolution
         self.device = device
         self.cpu_offload = cpu_offload
         self.group_offload = group_offload
+        self.model_version = model_version
 
     def run(self):
         try:
@@ -48,17 +50,18 @@ class ModelLoadWorker(QThread):
             )
 
             # Check if model needs downloading
-            if not self.engine.is_model_downloaded(self.resolution):
-                self.progress.emit(0, 100, "Model not found locally. Downloading...")
-                self.engine.download_model(self.resolution)
+            if not self.engine.is_model_downloaded(self.resolution, self.model_version):
+                self.progress.emit(0, 100, f"Model not found locally. Downloading {self.model_version}...")
+                self.engine.download_model(self.resolution, self.model_version)
 
             self.engine.load_model(
                 self.resolution,
                 self.device,
                 self.cpu_offload,
                 self.group_offload,
+                self.model_version,
             )
-            self.finished.emit(True, "Model loaded successfully")
+            self.finished.emit(True, f"Model loaded successfully ({self.model_version})")
         except Exception as e:
             self.finished.emit(False, str(e))
 
